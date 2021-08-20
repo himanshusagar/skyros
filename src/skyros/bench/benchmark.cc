@@ -53,9 +53,26 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 
+#include <netdb.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>       
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <random>
+
 #define OPCODE_SIZE 1
 #define KEY_SIZE 24
 #define VAL_SIZE 10
+
+#define PORT 8080
+#define SA struct sockaddr
+std::random_device rd;
+std::mt19937 e2(rd());
+int sockfd, connfd;
+int usingServer = 0;
 
 namespace specpaxos {
 
@@ -85,39 +102,49 @@ BenchmarkClient::BenchmarkClient(Client &client, Transport &transport,
     opcodes.reserve(numRequests);
 
     Notice("Using tracefile: %s", traceFile.c_str());
-    int traceFd = open(traceFile.c_str(), O_RDONLY);
-    assert(traceFd);
-    struct stat stat_buf;
-    int rc = 0;
-    assert(!(rc = stat(traceFile.c_str(), &stat_buf)));
-    void* vaddr =  mmap(NULL, stat_buf.st_size, PROT_READ, MAP_SHARED , traceFd, 0);
-    size_t off = 0;
-    char* curr = (char*) vaddr;
-    while(off < (uint32_t) stat_buf.st_size) {
-        char* op_ptr = curr;
-        curr += OPCODE_SIZE + 1; 
-        off += OPCODE_SIZE + 1;
+    if(traceFile.compare("nullfile")) {
+        string line;
+        std::ifstream tfile;
+        tfile.open(traceFile);
+        assert(tfile.is_open());
 
-        char* key_ptr = curr;
-        curr += KEY_SIZE + 1;
-        off += KEY_SIZE + 1;
-
-        string op = std::string(op_ptr, OPCODE_SIZE);
-        string key = std::string(key_ptr, KEY_SIZE);
-        assert(op.length() == OPCODE_SIZE);
-        assert(key.length() == KEY_SIZE);
-        operations.push_back(std::make_pair(op, key));
-
-        // load 100 more requests from the file 
-        // sometimes the benchmark sends slightly more requests than n...
-        if(operations.size() >= (uint32_t) numRequests + 100) {
-            break;
+        while(getline(tfile, line)) {
+            string op = line.substr(0, OPCODE_SIZE);
+            string key = line.substr(2, line.size() - OPCODE_SIZE - 1);
+            operations.push_back(std::make_pair(op, key));
+            // Notice("%s%s", op.c_str(), key.c_str());
         }
 
-        // Notice("op: %s key:%s", operations.back().first.c_str(), operations.back().second.c_str());
+        Notice("Loaded %lu operations (numrequests = %d) from tracefile: %s",
+         operations.size(), numRequests, traceFile.c_str());
+    } else {
+        usingServer = 1;
+        Notice("Nullfile. Will talk to server for requests...");
+        struct sockaddr_in servaddr;
+  
+        sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sockfd == -1) {
+            printf("socket creation failed...\n");
+            exit(0);
+        }
+        bzero(&servaddr, sizeof(servaddr));
+      
+        servaddr.sin_family = AF_INET;
+        servaddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+        servaddr.sin_port = htons(PORT);
+      
+        if (connect(sockfd, (SA*)&servaddr, sizeof(servaddr)) != 0) {
+            printf("connection with the server failed...\n");
+            exit(0);
+        }
     }
-    Notice("Loaded %lu operations (numrequests = %d) from tracefile: %s",
-     operations.size(), numRequests, traceFile.c_str());
+}
+
+char get_op() {
+    std::uniform_real_distribution<float> dist(0, 1);
+    if (dist(e2) < 0.5) 
+        return 'r';    
+    return 'u';
 }
 
 void
@@ -206,30 +233,38 @@ BenchmarkClient::SendNext()
         return;
     }
 
-    std::ostringstream msg;
+    std::string msg = "";
+	bool isNonNilext;
 
-    msg << operations[n].first << operations[n].second;
-    bool isRead = msg.str().c_str()[0] == 'r' || msg.str().c_str()[0] == 'R';
-    bool isUpdate = msg.str().c_str()[0] == 'u' || msg.str().c_str()[0] == 'U';
-    bool isNonNilext = msg.str().c_str()[0] == 'e' || msg.str().c_str()[0] == 'E';
-
-    if(!isRead) {
-    	if (isUpdate || isNonNilext)
-    		msg << string(VAL_SIZE, 'x');
-    	else
-    		msg << string(VAL_SIZE, 'v');
+    if(usingServer) {
+        char buff;
+        int resp;
+        buff = get_op();
+        assert(write(sockfd, &buff, sizeof(char)) == sizeof(char));
+        bzero(&resp, sizeof(int));
+        assert(read(sockfd, &resp, sizeof(int)) == sizeof(int));
+        // Notice("Op: %c key from server : %d", buff, resp);    
+        msg += buff;
+        msg += std::to_string(resp);
+	    isNonNilext = msg.c_str()[0] == 'e' || msg.c_str()[0] == 'E';
+        opcodes.push_back(buff);
+    } else {
+        std::ostringstream msgstream;
+        msgstream << operations[n].first << operations[n].second;
+        msg = msgstream.str();
+	    isNonNilext = msg.c_str()[0] == 'e' || msg.c_str()[0] == 'E';
+        opcodes.push_back(operations[n].first[0]);
     }
 
     Latency_Start(&latency);
-    opcodes.push_back(msg.str().c_str()[0]);
-    // InvokeNonNilext
+    
     if(isNonNilext) {
-        consensusClient.Invoke(msg.str(), std::bind(&BenchmarkClient::OnReply,
+        consensusClient.Invoke(msg, std::bind(&BenchmarkClient::OnReply,
                                        this,
                                        std::placeholders::_1,
                                        std::placeholders::_2));    
-    } else {  // InvokeNilext and InvokeRead
-        client.Invoke(msg.str(), std::bind(&BenchmarkClient::OnReply,
+    } else {
+        client.Invoke(msg, std::bind(&BenchmarkClient::OnReply,
                                        this,
                                        std::placeholders::_1,
                                        std::placeholders::_2));    
@@ -278,6 +313,11 @@ BenchmarkClient::Finish()
     Notice("Completed %d requests in " FMT_TIMEVAL_DIFF " seconds",
            n, VA_TIMEVAL_DIFF(diff));
     done = true;
+
+    /*if(usingServer) {
+        char buff = 'e';
+        assert(write(sockfd, &buff, sizeof(char)) == sizeof(char));
+    }*/
 
     transport.Timer(warmupSec * 1000,
                     std::bind(&BenchmarkClient::CooldownDone,

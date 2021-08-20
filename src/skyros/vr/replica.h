@@ -76,9 +76,6 @@ private:
     opnum_t lastBatchEnd;
     bool batchComplete;
 
-    uint64_t nilextCount;
-    uint64_t nonNilextCount;
-
     Log log;
     std::map<uint64_t, std::unique_ptr<TransportAddress> > clientAddresses;
     struct ClientTableEntry

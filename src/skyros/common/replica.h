@@ -70,7 +70,6 @@ class AppReplica
 {
 private:
     int opLength = 1;
-    int keyLength = 24;
 
     // This is the datastructure representing the hash-table based KV store.
     ConcurrentHashMap<string, std::string> kvStore;
@@ -86,7 +85,7 @@ private:
     int durLogIndex = 0;
 
     void apply(string key, string value) {
-    	// Notice("Applying %s to store", key.c_str());
+    	// Notice("Applying %s,%s to store ", key.c_str(), value.c_str());
     	kvStore.insert_or_assign(key, value);
     }
 
@@ -154,7 +153,7 @@ public:
 		syncOrder = false;
 
 		string op = msg.req().op().substr(0, opLength);
-		string kvKey = msg.req().op().substr(opLength, keyLength);
+		string kvKey = msg.req().op().substr(opLength, msg.req().op().size() - opLength);
 
 		std::pair<uint64_t, uint64_t> tableKey = std::make_pair(
 				msg.req().clientid(), msg.req().clientreqid());
@@ -166,29 +165,23 @@ public:
 			lastUpdateToKey.insert_or_assign(kvKey, tableKey);
 			readRes = "durable-ack";
 		} else if (IsGet(op)) {
-			if (durabilityLog.size() > 0) {
+			if(lastUpdateToKey.find(kvKey) != lastUpdateToKey.end()) {
+                std::pair<uint64_t, uint64_t> index = lastUpdateToKey[kvKey];
+                syncOrder = (durabilityLog.find(index) != durabilityLog.end());
 
-				if (lastUpdateToKey.find(kvKey) != lastUpdateToKey.end()) {
-					std::pair<uint64_t, uint64_t> index = lastUpdateToKey[kvKey];
-					syncOrder = (durabilityLog.find(index) != durabilityLog.end());
-
-					if (!syncOrder) {
-						// present in lastupdatetokey but not durability log
-						// which means the update must have been applied to the store
-						// Notice("Retrieving from store %s", kvKey.c_str());
-						assert(kvStore.find(kvKey) != kvStore.end());
-						readRes = (kvStore.find(kvKey))->second;
-					} else {
-						// pending update unordered.
-						readRes = "ordernowread!";
-					}
-				} else {
-					// no update to the key; so directly read.
-					readRes = getFromStore(kvKey);
-				}
-			} else { // No entries in durlog; so, no pending updates and thus can read directly.
-				readRes = getFromStore(kvKey);
-			}
+                if(!syncOrder) {
+                	// present in lastupdatetokey but not durability set
+                	// which means the update must have been applied to the store
+                	// Notice("Retrieving from store %s", kvKey.c_str());
+                	assert(kvStore.find(kvKey) != kvStore.end());
+                	readRes = (kvStore.find(kvKey))->second;
+                } else{
+                	readRes = "ordernowread!";
+                }
+            } else {
+                // not in lastupdatetokey
+                readRes = getFromStore(kvKey);
+            }
 		} else if (IsNonNilextWrite(op)) {
 			syncOrder = true;
 			readRes = "ordernownonnilext!";
@@ -221,7 +214,7 @@ public:
 		for (auto it : requests) {
 			std::pair<uint64_t, uint64_t> tableKey = std::make_pair(it.clientid(),
 					it.clientreqid());
-			string kvKey = it.op().substr(opLength, keyLength);
+			string kvKey = it.op().substr(opLength, it.op().size() - opLength);
 			specpaxos::vr::proto::RequestMessage *requestMessage = new  specpaxos::vr::proto::RequestMessage();
 			requestMessage->set_allocated_req(&it);
 			durabilityLog.insert_or_assign(tableKey, std::make_pair(durLogIndex++, *requestMessage));
@@ -260,11 +253,9 @@ public:
     virtual void ReplicaUpcall(opnum_t opnum, const Request &req, string &str2,
                                void *arg = nullptr, void *ret = nullptr) {
     	string op = req.op().substr(0, opLength);
-    	string kvKey = req.op().substr(opLength, keyLength);
+    	string kvKey = req.op().substr(opLength, req.op().size() - opLength);
     	if(!IsGet(op)) {
-			int otherLength = opLength + keyLength;
-			int valLength = req.op().length() - otherLength;
-			string kvVal = req.op().substr(otherLength, valLength);
+			string kvVal = "xxxxx";
 			//Notice("Applying and deleting from durability set %lu,%lu: %s,%s", req.clientid(),  req.clientreqid(), op.c_str(), kvKey.c_str());
 			apply(kvKey, kvVal);
 			str2 = "";

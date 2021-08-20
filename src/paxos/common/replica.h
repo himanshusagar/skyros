@@ -57,7 +57,6 @@ class AppReplica
 {
 private:
     int opLength = 1;
-    int keyLength = 24;
 
     ConcurrentHashMap<string, std::string> kvStore;
 
@@ -92,12 +91,10 @@ public:
     virtual void ReplicaUpcall(opnum_t opnum, const string &str1, string &str2,
                                void *arg = nullptr, void *ret = nullptr) {
     	string op = str1.substr(0, opLength);
-    	string kvKey = str1.substr(opLength, keyLength);
+    	string kvKey = str1.substr(opLength, str1.size() - opLength);
 		assert(IsSet(op)); // reads should not take this path in original VR
 
-		int otherLength = opLength + keyLength;
-		int valLength = str1.length() - otherLength;
-		string kvVal = str1.substr(otherLength, valLength);
+		string kvVal = "xxxxx";
 		apply(kvKey, kvVal);
 		str2 = ""; // dummy result for sets
     };
@@ -111,7 +108,7 @@ public:
         // read operation
         string op = str1.substr(0, opLength);
         assert(IsGet(op));
-        string kvKey = str1.substr(opLength, keyLength);
+        string kvKey = str1.substr(opLength, str1.size() - opLength);
         str2 = getFromStore(kvKey);
     };
 };
