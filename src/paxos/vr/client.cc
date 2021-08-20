@@ -176,7 +176,7 @@ VRClient::HandleReply(const TransportAddress &remote,
         return;
     }
 
-    Debug("Client received reply");
+    Debug2("Client received reply");
 
     requestTimeout->Stop();
 
@@ -202,7 +202,7 @@ VRClient::HandleUnloggedReply(const TransportAddress &remote,
         return;
     }
 
-    Debug("Client received unlogged reply");
+    Debug2("Client received unlogged reply");
 
     requestTimeout->Stop();
 

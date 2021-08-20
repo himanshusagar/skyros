@@ -39,9 +39,14 @@
 #include "lib/transport.h"
 #include "lib/viewstamp.h"
 #include "lib/workertasks.h"
+#include <assert.h>
+
+#include "rocksdb/slice.h"
+#include "rocksdb/options.h"
+#include "rocksdb/db.h"
 
 using folly::ConcurrentHashMap;
-
+using namespace rocksdb;
 namespace specpaxos {
 
 class Replica;
@@ -56,21 +61,28 @@ enum ReplicaStatus {
 class AppReplica
 {
 private:
+	int replicaId = -1;
     int opLength = 1;
     int keyLength = 24;
 
-    ConcurrentHashMap<string, std::string> kvStore;
+    DB* db;
+    Options options;
+
 
     void apply(string key, string value) {
-    	// Notice("Applying %s to store", key.c_str());
-    	kvStore.insert_or_assign(key, value);
+    	// Notice("Applying %s %s", key.c_str(), value.c_str());
+    	Status s = db->Put(WriteOptions(), key, value);
+        assert(s.ok());
     }
 
     string getFromStore(string key) {
-    	if(kvStore.find(key) != kvStore.end())
-			return (kvStore.find(key))->second;
+        std::string ret_value;
+        Status s = db->Get(ReadOptions(), key, &ret_value);
+        if(s.IsNotFound()) {
+            return "NOTFOUND";    
+        }
 
-		return "NOTFOUND";
+        return ret_value;
     }
 
     bool IsGet(string op) {
@@ -86,6 +98,17 @@ private:
 public:
     AppReplica() { };
     virtual ~AppReplica() { };
+
+    virtual void Initialize(int replicaIdx) {
+    	replicaId = replicaIdx;
+    	options.create_if_missing = true;
+    	options.compression = rocksdb::CompressionType::kNoCompression;
+        // options.write_buffer_size = 1 * 1024 * 1024 * 1024;
+    	string dbPath = "/dev/shm/rocks" + std::to_string(replicaId);
+    	Status s = DB::Open(options, dbPath , &db);
+    	assert(s.ok());
+    	Notice("Initialized rocks DBPath: %s", dbPath.c_str());
+    } 
     // Invoke callback on the leader, with the option to replicate on success
     virtual void LeaderUpcall(opnum_t opnum, const string &str1, bool &replicate, string &str2) { replicate = true; str2 = str1; };
     // Invoke callback on all replicas

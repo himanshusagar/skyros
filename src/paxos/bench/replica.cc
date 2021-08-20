@@ -197,7 +197,7 @@ main(int argc, char **argv)
     }
 
     UDPTransport transport(dropRate, reorderRate, dscp, nullptr);
-
+    nullApp->Initialize(index);
     specpaxos::Replica *replica;
     switch (proto) {
 

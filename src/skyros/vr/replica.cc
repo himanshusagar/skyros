@@ -51,7 +51,7 @@
 #include <boost/graph/topological_sort.hpp>
 #include <boost/graph/adjacency_list.hpp>
 
-#define RDebug(fmt, ...) Debug("[%d] " fmt, this->replicaIdx, ##__VA_ARGS__)
+#define RDebug(fmt, ...) Debug2("[%d] " fmt, this->replicaIdx, ##__VA_ARGS__)
 #define RNotice(fmt, ...) Notice("[%d] " fmt, this->replicaIdx, ##__VA_ARGS__)
 #define RWarning(fmt, ...) Warning("[%d] " fmt, this->replicaIdx, ##__VA_ARGS__)
 #define RPanic(fmt, ...) Panic("[%d] " fmt, this->replicaIdx, ##__VA_ARGS__)
@@ -82,7 +82,6 @@ VRReplica::VRReplica(Configuration config, int myIdx,
     this->lastRequestStateTransferOpnum = 0;
     lastBatchEnd = 0;
     batchComplete = true;
-    this->nilextCount = this->nonNilextCount = 0;
 
     if (batchSize > 1) {
         Notice("Batching enabled; batch size %d", this->batchSize);
@@ -626,34 +625,10 @@ VRReplica::HandleRequest(const TransportAddress &remote,
     /* Add the request to my log */
     log.Append(v, request, LOG_STATE_PREPARED);
 
-    // This condition says when to close the current batch
-    bool condition = false;
+    bool condition = batchComplete ||
+        (lastOp - lastBatchEnd+1 > (unsigned int)batchSize);
 
-    // two kinds of operations can come to this function: a sync_read or a non-nilext update
-    // we need to reduce the latency of reads, so immediately close the batch for a read
-    if(request.syncread() == 1) {
-        condition = true;    
-    } else {
-        // this is a non-nilext update
-        nonNilextCount++;
-        // run has stabilized
-        if(nilextCount + nonNilextCount > 1000) 
-        {
-            if(nilextCount > nonNilextCount) {
-                // so far, it has been nilext heavy
-                // so makes sense to close the batch now
-                condition = true;
-            } else {
-                // non-nilext heavy
-                // don't close the batch immediately
-                condition = batchComplete ||
-                (lastOp - lastBatchEnd+1 > (unsigned int)batchSize);
-            }
-        } else {
-            condition = true;
-        }
-    }
-
+    condition = true;
     if (condition) {
         CloseBatch();
     } else {
@@ -685,7 +660,6 @@ VRReplica::HandleRequestBg(const RequestMessage &msg)
         return;
     }
 
-    nilextCount++;
     // Check the client table to see if this is a duplicate request
     auto kv = clientTable.find(msg.req().clientid());
     if (kv != clientTable.end()) {
@@ -752,7 +726,7 @@ VRReplica::HandleUnloggedRequest(const TransportAddress &remote,
 
     UnloggedReplyMessage reply;
 
-    Debug("Received unlogged request %s", (char *)msg.req().op().c_str());
+    Debug2("Received unlogged request %s", (char *)msg.req().op().c_str());
 
     ExecuteUnlogged(msg.req(), reply);
 

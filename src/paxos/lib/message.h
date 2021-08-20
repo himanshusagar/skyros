@@ -88,7 +88,7 @@ void PanicOnSignal(int signo);
 // per file that uses the Debug macro.
 static __attribute__((unused)) signed char _Message_FileDebugFlag = -1;
 
-#define Debug(msg...)                                   \
+#define Debug2(msg...)                                   \
         do {                                            \
                 if (Message_DebugEnabled(__FILE__))     \
                         MessageFlags(MSG_DEBUG, msg);   \

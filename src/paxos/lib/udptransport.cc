@@ -703,7 +703,7 @@ UDPTransport::ProcessPacket(int fd, sockaddr_in sender, socklen_t senderSize,
 
         info.data.append(string(ptr, buf + sz - ptr));
         if (info.data.size() == msgLen) {
-            Debug("Completed packet reconstruction");
+            Debug2("Completed packet reconstruction");
             DecodePacket(info.data.c_str(), info.data.size(),
                          msgType, msg, &meta_data);
             info.msgId = 0;
@@ -749,7 +749,7 @@ UDPTransport::ProcessPacket(int fd, sockaddr_in sender, socklen_t senderSize,
     if (dropRate > 0.0) {
         double roll = uniformDist(randomEngine);
         if (roll < dropRate) {
-            Debug("Simulating packet drop of message type %s",
+            Debug2("Simulating packet drop of message type %s",
                   msgType.c_str());
             return;
         }
@@ -758,7 +758,7 @@ UDPTransport::ProcessPacket(int fd, sockaddr_in sender, socklen_t senderSize,
     if (!reorderBuffer.valid && (reorderRate > 0.0)) {
         double roll = uniformDist(randomEngine);
         if (roll < reorderRate) {
-            Debug("Simulating reorder of message type %s",
+            Debug2("Simulating reorder of message type %s",
                   msgType.c_str());
             ASSERT(!reorderBuffer.valid);
             reorderBuffer.valid = true;
@@ -803,7 +803,7 @@ deliver:
         fd = reorderBuffer.fd;
         senderAddr = *(reorderBuffer.addr);
         delete reorderBuffer.addr;
-        Debug("Delivering reordered packet of type %s",
+        Debug2("Delivering reordered packet of type %s",
               msgType.c_str());
         goto deliver;       // XXX I am a bad person for this.
     }

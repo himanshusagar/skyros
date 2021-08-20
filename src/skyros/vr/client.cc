@@ -191,7 +191,7 @@ VRClient::HandleReply(const TransportAddress &remote,
         return;
     }
 
-    Debug("Client received reply");
+    Debug2("Client received reply");
 
     if(responses[msg.clientreqid()] >= quorum
         && leader_acked[msg.clientreqid()]) {
@@ -213,7 +213,7 @@ VRClient::HandleUnloggedReply(const TransportAddress &remote,
         return;
     }
 
-    Debug("Client received unloggedReply");
+    Debug2("Client received unloggedReply");
 
     unloggedRequestTimeout->Stop();
 

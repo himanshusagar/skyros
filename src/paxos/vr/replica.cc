@@ -41,7 +41,7 @@
 #include <algorithm>
 #include <random>
 
-#define RDebug(fmt, ...) Debug("[%d] " fmt, this->replicaIdx, ##__VA_ARGS__)
+#define RDebug(fmt, ...) Debug2("[%d] " fmt, this->replicaIdx, ##__VA_ARGS__)
 #define RNotice(fmt, ...) Notice("[%d] " fmt, this->replicaIdx, ##__VA_ARGS__)
 #define RWarning(fmt, ...) Warning("[%d] " fmt, this->replicaIdx, ##__VA_ARGS__)
 #define RPanic(fmt, ...) Panic("[%d] " fmt, this->replicaIdx, ##__VA_ARGS__)
@@ -593,7 +593,7 @@ VRReplica::HandleUnloggedRequest(const TransportAddress &remote,
 
     UnloggedReplyMessage reply;
 
-    Debug("Received unlogged request %s", (char *)msg.req().op().c_str());
+    Debug2("Received unlogged request %s", (char *)msg.req().op().c_str());
 
     ExecuteUnlogged(msg.req(), reply);
     reply.set_clientreqid(msg.req().clientreqid());

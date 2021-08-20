@@ -60,15 +60,15 @@ Replica::LeaderUpcall(opnum_t opnum, const string &op, bool &replicate, string &
 void
 Replica::ReplicaUpcall(opnum_t opnum, const string &op, string &res, void *arg, void *ret)
 {
-    Debug("Making upcall for operation %s", op.c_str());
+    Debug2("Making upcall for operation %s", op.c_str());
     app->ReplicaUpcall(opnum, op, res, arg, ret);
-    Debug("Upcall result: %s", res.c_str());
+    Debug2("Upcall result: %s", res.c_str());
 }
 
 void
 Replica::Rollback(opnum_t current, opnum_t to, Log &log)
 {
-    Debug("Making rollback-upcall from " FMT_OPNUM " to " FMT_OPNUM,
+    Debug2("Making rollback-upcall from " FMT_OPNUM " to " FMT_OPNUM,
           current, to);
 
     std::map<opnum_t, string> reqs;

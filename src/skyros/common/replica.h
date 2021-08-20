@@ -47,11 +47,16 @@
 #include "vr/vr-proto.pb.h"
 #include <assert.h>
 
+#include "rocksdb/slice.h"
+#include "rocksdb/options.h"
+#include "rocksdb/db.h"
+
 #include <queue>
 #include <map>
 #include <boost/lockfree/spsc_queue.hpp>
 
 using folly::ConcurrentHashMap;
+using namespace rocksdb;
 
 typedef std::pair<uint64_t, uint64_t> CXID;
 
@@ -69,11 +74,13 @@ enum ReplicaStatus {
 class AppReplica
 {
 private:
+	int replicaId = -1;
     int opLength = 1;
     int keyLength = 24;
 
-    // This is the datastructure representing the hash-table based KV store.
-    ConcurrentHashMap<string, std::string> kvStore;
+    DB* db;
+    DB* dbshadow;
+	Options options;
 
     // The lastUpdateToKey is a supporting index structure
     // It facilitates a quick way of seeing what is the latest update to a key that is being read.
@@ -85,16 +92,25 @@ private:
     ConcurrentHashMap<CXID, std::pair<uint64_t, specpaxos::vr::proto::RequestMessage>> durabilityLog;
     int durLogIndex = 0;
 
+    void validate(string key, string value) {
+    	Status s = dbshadow->Put(WriteOptions(), key, value);
+        assert(s.ok());
+    }
+
     void apply(string key, string value) {
-    	// Notice("Applying %s to store", key.c_str());
-    	kvStore.insert_or_assign(key, value);
+    	// Notice("Applying %s %s", key.c_str(), value.c_str());
+    	Status s = db->Put(WriteOptions(), key, value);
+        assert(s.ok());
     }
 
     string getFromStore(string key) {
-    	if(kvStore.find(key) != kvStore.end())
-			return (kvStore.find(key))->second;
+        std::string ret_value;
+        Status s = db->Get(ReadOptions(), key, &ret_value);
+        if(s.IsNotFound()) {
+            return "NOTFOUND";    
+        }
 
-		return "NOTFOUND";
+        return ret_value;
     }
 
     bool IsGet(string op) {
@@ -119,6 +135,22 @@ public:
     };
 
     virtual ~AppReplica() { };
+
+    virtual void Initialize(int replicaIdx) {
+    	replicaId = replicaIdx;
+    	options.create_if_missing = true;
+    	options.compression = rocksdb::CompressionType::kNoCompression;
+    	string dbPath = "/dev/shm/rocks" + std::to_string(replicaId);
+    	Status s = DB::Open(options, dbPath , &db);
+    	assert(s.ok());
+    	Notice("Initialized rocks DBPath: %s", dbPath.c_str());
+
+    	dbPath = "/dev/shm/rocks" + std::to_string(replicaId) + ".shadow";
+    	s = DB::Open(options, dbPath , &dbshadow);
+    	assert(s.ok());
+    	Notice("Initialized rocks.shadow DBPath: %s", dbPath.c_str());
+    } 
+
 	virtual void AddToQueue(specpaxos::vr::proto::RequestMessage msg) {
 		while(!queue.push(msg));
 	}
@@ -164,31 +196,32 @@ public:
 
 			durabilityLog.insert_or_assign(tableKey, std::make_pair(durLogIndex++,msg));
 			lastUpdateToKey.insert_or_assign(kvKey, tableKey);
+			int otherLength = opLength + keyLength;
+			int valLength = msg.req().op().length() - otherLength;
+			string kvVal = msg.req().op().substr(otherLength, valLength);
+			validate(kvKey, kvVal);
 			readRes = "durable-ack";
 		} else if (IsGet(op)) {
-			if (durabilityLog.size() > 0) {
+			if(lastUpdateToKey.find(kvKey) != lastUpdateToKey.end()) {
+                std::pair<uint64_t, uint64_t> index = lastUpdateToKey[kvKey];
+                syncOrder = (durabilityLog.find(index) != durabilityLog.end());
 
-				if (lastUpdateToKey.find(kvKey) != lastUpdateToKey.end()) {
-					std::pair<uint64_t, uint64_t> index = lastUpdateToKey[kvKey];
-					syncOrder = (durabilityLog.find(index) != durabilityLog.end());
+                if(!syncOrder) {
+                	// present in lastupdatetokey but not durability set
+                	// which means the update must have been applied to the store
+                	// Notice("Retrieving from store %s", kvKey.c_str());
 
-					if (!syncOrder) {
-						// present in lastupdatetokey but not durability log
-						// which means the update must have been applied to the store
-						// Notice("Retrieving from store %s", kvKey.c_str());
-						assert(kvStore.find(kvKey) != kvStore.end());
-						readRes = (kvStore.find(kvKey))->second;
-					} else {
-						// pending update unordered.
-						readRes = "ordernowread!";
-					}
-				} else {
-					// no update to the key; so directly read.
-					readRes = getFromStore(kvKey);
-				}
-			} else { // No entries in durlog; so, no pending updates and thus can read directly.
-				readRes = getFromStore(kvKey);
-			}
+                    std::string ret_value;
+                    Status s = db->Get(ReadOptions(), kvKey, &ret_value);
+                    assert(s.ok());
+                    readRes = ret_value;
+                } else{
+                	readRes = "ordernowread!";
+                }
+            } else {
+                // not in lastupdatetokey
+                readRes = getFromStore(kvKey);
+            }
 		} else if (IsNonNilextWrite(op)) {
 			syncOrder = true;
 			readRes = "ordernownonnilext!";

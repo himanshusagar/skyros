@@ -174,7 +174,7 @@ Log::RemoveAfter(opnum_t op)
         return;
     }
 
-    Debug("Removing log entries after " FMT_OPNUM, op);
+    Debug2("Removing log entries after " FMT_OPNUM, op);
 
     ASSERT(op-start < entries.size());
     entries.resize(op-start);

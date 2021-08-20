@@ -207,6 +207,7 @@ main(int argc, char **argv)
     UDPTransport internalTransport(dropRate, reorderRate, dscp, nullptr);
     specpaxos::Replica *replica;
     assert(proto == PROTO_VR);
+    nullApp->Initialize(index);
 	replica = new specpaxos::vr::VRReplica(internalConfig, index,
 											   !recover,
 											   &internalTransport,

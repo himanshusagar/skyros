@@ -2,14 +2,17 @@
 # Top-level makefile for specpaxos
 #
 
+ROCKSDB_PATH = ../deps/rocksdb-6.12.7/
+include $(ROCKSDB_PATH)/make_config.mk
+
 CC = gcc
 CXX = g++
 LD = g++
 EXPAND = lib/tmpl/expand
 
 CFLAGS := -w -g -Wall -pthread -iquote.obj/gen -Wno-uninitialized -O3 
-CXXFLAGS := -O3 -I/usr/local/include/ -std=c++17
-LDFLAGS := -levent_pthreads -ldl -lfolly -lpthread -lfmt -lglog -lgflags -ldouble-conversion -lboost_filesystem -lboost_system -lboost_program_options -liberty
+CXXFLAGS := -O3 -I/usr/local/include/ -I$(ROCKSDB_PATH)/include -std=c++17
+LDFLAGS := $(ROCKSDB_PATH)/librocksdb.a $(EXEC_LDFLAGS) -levent_pthreads $(PLATFORM_LDFLAGS) -ldl -lfolly -lpthread -lfmt -lglog -lgflags -ldouble-conversion -lboost_filesystem -lboost_system -lboost_program_options -liberty -lboost_regex
 LIBPATH := -I./ 
 CFLAGS += $(LIBPATH)
 ## Debian package: check
