@@ -3,12 +3,7 @@
  *
  * benchmark.cpp:
  *   simple replication benchmark client
- * 
- * Copyright 2021 Aishwarya Ganesan and Ramnatthan Alagappan
  *
- * Small changes made to the code to implement Skyros
- *
- * *************************************************************
  * Copyright 2013 Dan R. K. Ports  <drkp@cs.washington.edu>
  *
  * Permission is hereby granted, free of charge, to any person
@@ -68,12 +63,11 @@ BenchmarkClient::BenchmarkClient(Client &client, Transport &transport,
 				 int tputInterval,
                  string traceFile,
                  int experimentDuration,
-                 Client &consensusClient,
                  string latencyFilename)
     : tputInterval(tputInterval), client(client),
     transport(transport), numRequests(numRequests),
     delay(delay), warmupSec(warmupSec), traceFile(traceFile),
-    experimentDuration(experimentDuration), consensusClient(consensusClient), latencyFilename(latencyFilename)
+    experimentDuration(experimentDuration), latencyFilename(latencyFilename)
 {
     if (delay != 0) {
         Notice("Delay between requests: %ld ms", delay);
@@ -217,7 +211,6 @@ BenchmarkClient::SendNext()
     msg << operations[n].first;
     bool isRead = msg.str().c_str()[0] == 'r' || msg.str().c_str()[0] == 'R';
     bool isAppend = msg.str().c_str()[0] == 'a' || msg.str().c_str()[0] == 'A';
-    bool isNonNilext = msg.str().c_str()[0] == 'e' || msg.str().c_str()[0] == 'E';
 
     if (isAppend) {
         msg << string(VAL_SIZE, 'x');
@@ -229,18 +222,10 @@ BenchmarkClient::SendNext()
 
     Latency_Start(&latency);
     opcodes.push_back(msg.str().c_str()[0]);
-    // InvokeNonNilext
-    if(isNonNilext) {
-        consensusClient.Invoke(msg.str(), std::bind(&BenchmarkClient::OnReply,
+    client.Invoke(msg.str(), std::bind(&BenchmarkClient::OnReply,
                                        this,
                                        std::placeholders::_1,
-                                       std::placeholders::_2));    
-    } else {  // InvokeNilext and InvokeRead
-        client.Invoke(msg.str(), std::bind(&BenchmarkClient::OnReply,
-                                       this,
-                                       std::placeholders::_1,
-                                       std::placeholders::_2));    
-    }
+                                       std::placeholders::_2));
 }
 
 void
@@ -284,6 +269,7 @@ BenchmarkClient::Finish()
 
     Notice("Completed %d requests in " FMT_TIMEVAL_DIFF " seconds",
            n, VA_TIMEVAL_DIFF(diff));
+    Notice("1rtt:%d,2rtt:%d,3rtt:%d",client.oneRTTs, client.twoRTTs, client.threeRTTs);
     done = true;
 
     transport.Timer(warmupSec * 1000,

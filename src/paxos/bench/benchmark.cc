@@ -50,7 +50,8 @@
 
 #define OPCODE_SIZE 1
 #define KEY_SIZE 24
-#define VAL_SIZE 10
+#define VAL_SIZE 32
+#define BLOCK_NUMBER_CHARS 9 // allow 1 billion blocks
 
 namespace specpaxos {
 
@@ -92,15 +93,20 @@ BenchmarkClient::BenchmarkClient(Client &client, Transport &transport,
         curr += OPCODE_SIZE + 1; 
         off += OPCODE_SIZE + 1;
 
-        char* key_ptr = curr;
-        curr += KEY_SIZE + 1;
-        off += KEY_SIZE + 1;
-
         string op = std::string(op_ptr, OPCODE_SIZE);
-        string key = std::string(key_ptr, KEY_SIZE);
-        assert(op.length() == OPCODE_SIZE);
-        assert(key.length() == KEY_SIZE);
-        operations.push_back(std::make_pair(op, key));
+
+        if(!op.compare("a") || !op.compare("A"))
+            operations.push_back(std::make_pair(op, ""));
+        else {
+            assert(!op.compare("r") || !op.compare("R"));
+            char* block_num_ptr = curr;
+            string blocknum = std::string(block_num_ptr, BLOCK_NUMBER_CHARS);
+            curr += BLOCK_NUMBER_CHARS + 1;
+            off += BLOCK_NUMBER_CHARS + 1;
+            // Notice("will read block #: %s", blocknum.c_str());
+            
+            operations.push_back(std::make_pair(op, blocknum));
+        }
 
         // load 100 more requests from the file 
         // sometimes the benchmark sends slightly more requests than n...
@@ -202,16 +208,16 @@ BenchmarkClient::SendNext()
 
     std::ostringstream msg;
 
-    msg << operations[n].first << operations[n].second;
+    msg << operations[n].first;
     bool isRead = msg.str().c_str()[0] == 'r' || msg.str().c_str()[0] == 'R';
-    bool isUpdate = msg.str().c_str()[0] == 'u' || msg.str().c_str()[0] == 'U';
-    bool nonNilext = msg.str().c_str()[0] == 'e' || msg.str().c_str()[0] == 'E';
+    bool isAppend = msg.str().c_str()[0] == 'a' || msg.str().c_str()[0] == 'A';
 
-    if(!isRead) {
-    	if (isUpdate || nonNilext)
-    		msg << string(VAL_SIZE, 'x');
-    	else
-    		msg << string(VAL_SIZE, 'v');
+    if (isAppend) {
+        msg << string(VAL_SIZE, 'x');
+    }
+    else {
+        assert(isRead);
+        msg << operations[n].second; // block number
     }
 
     Latency_Start(&latency);

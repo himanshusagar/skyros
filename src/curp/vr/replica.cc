@@ -1,11 +1,8 @@
 // -*- mode: c++; c-file-style: "k&r"; c-basic-offset: 4 -*-
 /***********************************************************************
  *
- * Copyright 2021 Aishwarya Ganesan and Ramnatthan Alagappan
- *
- * Significant changes made to the code to implement Skyros
- *
- * *************************************************************
+ * vr/replica.cc:
+ *   Viewstamped Replication protocol
  *
  * Copyright 2013 Dan R. K. Ports  <drkp@cs.washington.edu>
  *
@@ -198,6 +195,7 @@ VRReplica::CommitUpTo(opnum_t upto)
 
 	// for debugging
         if(lastCommitted %100000 == 0) {
+        	//log.PrintLog2();
             Notice("lastcommitted %lu", lastCommitted);
         }
 
@@ -216,11 +214,13 @@ VRReplica::CommitUpTo(opnum_t upto)
         }
 
         /* Send reply */
-        // send consensus reply to the durability server
-	// for kv store app, this must be a read
-        if (entry->request.needreply() == 1) {
-            if(entry->request.syncread() == 1) {
+        // RTOP change: send consensus reply to the durability server
+		// for kv store app, this must be a read
+	//cte.syncread is set if we received a 3rtt retry request but the original request was added to log and but not committed.
+        if (entry->request.needreply() == 1 || cte.syncread) {
+            if(entry->request.syncread() == 1 || cte.syncread) {
                 auto iter = app->clientAddresses.find(entry->request.clientid());
+                reply.set_conflicting(1);
                 if (iter != app->clientAddresses.end()) {
                     transport->SendMessage(this, *iter->second, reply);
                 } 
@@ -275,7 +275,7 @@ void VRReplica::BgRepl()
 	while(!msgs.empty()) {
 		RequestMessage msg = msgs.front();
 		//Notice("Dequeued a message: %s", msg.req().op().c_str());
-		HandleRequestBg(msg);
+		HandleRequest2(msg);
 		msgs.pop();
 	}
 	this->bgReplTimeout->Reset();
@@ -359,7 +359,6 @@ VRReplica::EnterView(view_t newview)
         viewChangeTimeout->Stop();
         nullCommitTimeout->Start();
         bgReplTimeout->Start();
-        manualEV->Start();
     } else {
         viewChangeTimeout->Start();
         nullCommitTimeout->Stop();
@@ -427,6 +426,7 @@ VRReplica::UpdateClientTable(const Request &req)
 
     entry.lastReqId = req.clientreqid();
     entry.replied = false;
+    entry.syncread = false;
     entry.reply.Clear();
 }
 
@@ -548,6 +548,8 @@ void
 VRReplica::HandleRequest(const TransportAddress &remote,
                          const RequestMessage &msg)
 {
+	Notice("We do not expect this path in CURP");
+	assert(0);
     viewstamp_t v;
     Latency_Start(&requestLatency);
 
@@ -586,9 +588,13 @@ VRReplica::HandleRequest(const TransportAddress &remote,
             // waiting for the other replicas; in that case, just
             // discard the request.
             if (entry.replied) {
+        		ReplyMessage reply = ReplyMessage(entry.reply);
+            	if (msg.req().syncread()) {
+            		reply.set_conflicting(1);
+            	}
                 RNotice("Received duplicate request; resending reply");
                 if (!(transport->SendMessage(this, remote,
-                                             entry.reply))) {
+                                             reply))) {
                     RWarning("Failed to resend reply to client");
                 }
                 Latency_EndType(&requestLatency, 'r');
@@ -625,11 +631,8 @@ VRReplica::HandleRequest(const TransportAddress &remote,
     /* Add the request to my log */
     log.Append(v, request, LOG_STATE_PREPARED);
 
-    bool condition = batchComplete ||
-        (lastOp - lastBatchEnd+1 > (unsigned int)batchSize);
-
-    condition = true;
-    if (condition) {
+    if (batchComplete ||
+        (lastOp - lastBatchEnd+1 > (unsigned int)batchSize)) {
         CloseBatch();
     } else {
         RDebug("Keeping in batch");
@@ -643,7 +646,7 @@ VRReplica::HandleRequest(const TransportAddress &remote,
 }
 
 void
-VRReplica::HandleRequestBg(const RequestMessage &msg)
+VRReplica::HandleRequest2(const RequestMessage &msg)
 {
     viewstamp_t v;
     Latency_Start(&requestLatency);
@@ -661,24 +664,34 @@ VRReplica::HandleRequestBg(const RequestMessage &msg)
     }
 
     // Check the client table to see if this is a duplicate request
-    auto kv = clientTable.find(msg.req().clientid());
-    if (kv != clientTable.end()) {
-        const ClientTableEntry &entry = kv->second;
-        if (msg.req().clientreqid() < entry.lastReqId) {
-            RNotice("Ignoring stale request");
-            Latency_EndType(&requestLatency, 's');
-            return;
-        }
-        if (msg.req().clientreqid() == entry.lastReqId) {
-            if (entry.replied) {
-                RNotice("Received duplicate request; resending reply");
-                return;
-            } else {
-                RNotice("Received duplicate request but no reply available; ignoring");
-                return;
-            }
-        }
-    }
+	auto kv = clientTable.find(msg.req().clientid());
+	if (kv != clientTable.end()) {
+		ClientTableEntry &entry = kv->second;
+		if (msg.req().clientreqid() < entry.lastReqId) {
+			RNotice("Ignoring stale request");
+			Latency_EndType(&requestLatency, 's');
+			return;
+		}
+		if (msg.req().clientreqid() == entry.lastReqId) {
+			if (entry.replied) {
+				//RNotice("Received duplicate request; resending reply");
+				if (msg.req().syncread() == 1) {
+					//if sync read is set then set the conflicting bit before sending reply to client
+					auto iter = app->clientAddresses.find(msg.req().clientid());
+					ReplyMessage reply = ReplyMessage(entry.reply);
+					reply.set_conflicting(1);
+					if (iter != app->clientAddresses.end()) {
+						transport->SendMessage(this, *iter->second, reply);
+					}
+				}
+				return;
+			} else {
+				//RNotice("Received duplicate request but no reply available; can't ignore it");
+				entry.syncread = true;
+				return;
+			}
+		}
+	}
 
     // Update the client table
     UpdateClientTable(msg.req());
@@ -689,7 +702,12 @@ VRReplica::HandleRequestBg(const RequestMessage &msg)
 	request.set_op(msg.req().op());
 	request.set_clientid(msg.req().clientid());
 	request.set_clientreqid(msg.req().clientreqid());
-
+	request.set_syncread(msg.req().syncread());
+	if (msg.req().syncread()){
+		//set need reply on if it is coming from sync op path;
+		//otherwise we are ordering a non-conflicting write in the background
+		request.set_needreply(1);
+	}
 	/* Assign it an opnum */
 	++this->lastOp;
 	v.view = this->view;
@@ -720,6 +738,8 @@ VRReplica::HandleUnloggedRequest(const TransportAddress &remote,
                                  const UnloggedRequestMessage &msg)
 {
     if (status != STATUS_NORMAL) {
+        // Not clear if we should ignore this or just let the request
+        // go ahead, but this seems reasonable.
         RNotice("Ignoring unlogged request due to abnormal status");
         return;
     }
@@ -1326,9 +1346,7 @@ VRReplica::HandleDoViewChange(const TransportAddress &remote,
 
         std::vector<DoViewChangeMessage> dvcs;
 		for (auto kv : *msgs) {
-			if (kv.second.lastnormalview() == latestView) {
 			dvcs.push_back(kv.second);
-			}
 		}
 
         // Install the new log. We might not need to do this, if our
@@ -1357,31 +1375,21 @@ VRReplica::HandleDoViewChange(const TransportAddress &remote,
                    log.LastViewstamp().view, lastOp);
         }
 
-        lastOp = latestOp;
         // merge all the durability logs from f DVC messages and self
        	std::vector<Request> mergedAndOrderedDurabilityLog = ConstructOrderedDurabilityLog(dvcs);
 
 		//set leader's durability log to mergedAndOrderedDurabilityLog
 		app->clearDurabilityLog();
 		app->addToDurabilityLogInOrder(mergedAndOrderedDurabilityLog);
-		app->clearQueue();
-		// add entries from durlog to consensus log
-		for (auto req : mergedAndOrderedDurabilityLog) {
-			auto kv = clientTable.find(req.clientid());
-			if (kv != clientTable.end()) {
-				const ClientTableEntry &entry = kv->second;
-				if (req.clientreqid() <= entry.lastReqId) {
-					continue;
-				}
-			}
-			UpdateClientTable(req);
-			++this->lastOp;
-			viewstamp_t v;
-			v.view = this->view;
-			v.opnum = this->lastOp;
-		    log.Append(v, req, LOG_STATE_PREPARED);
-		}
 
+		//add from durability log to tosendqueue
+		app->clearQueue();
+		for (auto req : mergedAndOrderedDurabilityLog) {
+			RequestMessage *requestMessage = new RequestMessage();
+            requestMessage->set_allocated_req(&req);
+			app->AddToQueue(*requestMessage);
+		}
+		//Notice("Added to queue");
         // How much of the log should we include when we send the
         // STARTVIEW message? Start from the lowest committed opnum of
         // any of the STARTVIEWCHANGE or DOVIEWCHANGE messages we got.
@@ -1408,7 +1416,7 @@ VRReplica::HandleDoViewChange(const TransportAddress &remote,
 
         ASSERT(AmLeader());
 
-
+        lastOp = latestOp;
         if (latestMsg != NULL) {
             CommitUpTo(latestMsg->lastcommitted());
         }
@@ -1431,7 +1439,7 @@ void
 VRReplica::HandleStartView(const TransportAddress &remote,
                            const StartViewMessage &msg)
 {
-    RNotice("Received STARTVIEW " FMT_VIEW
+    RDebug("Received STARTVIEW " FMT_VIEW
           " op=" FMT_OPNUM " committed=" FMT_OPNUM " entries=%d",
           msg.view(), msg.lastop(), msg.lastcommitted(), msg.entries_size());
     RDebug("Currently in view " FMT_VIEW " op " FMT_OPNUM " committed " FMT_OPNUM,

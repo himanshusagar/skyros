@@ -3,12 +3,7 @@
  *
  * vr/replica.h:
  *   Viewstamped Replication protocol
- * 
- * Copyright 2021 Aishwarya Ganesan and Ramnatthan Alagappan
  *
- * Small changes made to the code to implement Skyros
- *
- * *************************************************************
  * Copyright 2013 Dan R. K. Ports  <drkp@cs.washington.edu>
  *
  * Permission is hereby granted, free of charge, to any person
@@ -82,6 +77,7 @@ private:
     {
         uint64_t lastReqId;
         bool replied;
+        bool syncread;
         proto::ReplyMessage reply;
     };
     std::map<uint64_t, ClientTableEntry> clientTable;
@@ -121,7 +117,7 @@ private:
 
     void HandleRequest(const TransportAddress &remote,
                        const proto::RequestMessage &msg);
-    void HandleRequestBg(const proto::RequestMessage &msg);
+    void HandleRequest2(const proto::RequestMessage &msg);
     void HandleUnloggedRequest(const TransportAddress &remote,
                                const proto::UnloggedRequestMessage &msg);
 

@@ -57,31 +57,29 @@ class AppReplica
 {
 private:
     int opLength = 1;
-    int keyLength = 24;
+    int totalBlocks = 0;
+    std::vector<std::string> file;
+    int currentAppendIndex = 0;
 
-    ConcurrentHashMap<string, std::string> kvStore;
 
-    void apply(string key, string value) {
-    	// Notice("Applying %s to store", key.c_str());
-    	kvStore.insert_or_assign(key, value);
+    void apply(string data) {
+    	file.push_back(data); 
+    	totalBlocks++;
     }
 
-    string getFromStore(string key) {
-    	if(kvStore.find(key) != kvStore.end())
-			return (kvStore.find(key))->second;
-
-		return "NOTFOUND";
+    string read(int blockNumber) {
+    	if (blockNumber >= totalBlocks)
+			return "NOTFOUND";
+		return file[blockNumber];   
     }
 
-    bool IsGet(string op) {
+    bool IsRead(string op) {
     	return !op.compare("r") || !op.compare("R");
     }
 
-    bool IsSet(string op) {
-    	return !op.compare("i") || !op.compare("I")
-    			|| !op.compare("u") || !op.compare("U")
-    			|| !op.compare("e") || !op.compare("E"); // non-nilext
-     }
+    bool IsAppend(string op) {
+    	return !op.compare("a") || !op.compare("A");
+    }
 
 public:
     AppReplica() { };
@@ -91,14 +89,11 @@ public:
     // Invoke callback on all replicas
     virtual void ReplicaUpcall(opnum_t opnum, const string &str1, string &str2,
                                void *arg = nullptr, void *ret = nullptr) {
-    	string op = str1.substr(0, opLength);
-    	string kvKey = str1.substr(opLength, keyLength);
-		assert(IsSet(op)); // reads should not take this path in original VR
-
-		int otherLength = opLength + keyLength;
-		int valLength = str1.length() - otherLength;
-		string kvVal = str1.substr(otherLength, valLength);
-		apply(kvKey, kvVal);
+		size_t totalLen = str1.size();
+		string op = str1.substr(0, opLength);
+		string remaining = str1.substr(opLength, totalLen - opLength);
+		assert(IsAppend(op)); // reads should not take this path in original VR
+		apply(remaining);
 		str2 = ""; // dummy result for sets
     };
 
@@ -109,10 +104,12 @@ public:
     // Invoke call back for unreplicated operations run on only one replica
     virtual void UnloggedUpcall(const string &str1, string &str2) { 
         // read operation
-        string op = str1.substr(0, opLength);
-        assert(IsGet(op));
-        string kvKey = str1.substr(opLength, keyLength);
-        str2 = getFromStore(kvKey);
+    	size_t totalLen = str1.size();
+    	string op = str1.substr(0, opLength);
+		string remaining = str1.substr(opLength, totalLen - opLength);
+
+        assert(IsRead(op));
+    	str2 = read(std::stoi(remaining));
     };
 };
 

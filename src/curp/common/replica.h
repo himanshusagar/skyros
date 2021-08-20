@@ -3,12 +3,7 @@
  *
  * replica.h:
  *   common interface to different replication protocols
- * 
- * Copyright 2021 Aishwarya Ganesan and Ramnatthan Alagappan
  *
- * Significant changes made to the code to implement Skyros
- *
- * *************************************************************
  * Copyright 2013 Dan R. K. Ports  <drkp@cs.washington.edu>
  *
  * Permission is hereby granted, free of charge, to any person
@@ -47,6 +42,7 @@
 #include "vr/vr-proto.pb.h"
 #include <assert.h>
 
+#include <boost/lexical_cast.hpp>
 #include <queue>
 #include <map>
 #include <boost/lockfree/spsc_queue.hpp>
@@ -69,13 +65,17 @@ enum ReplicaStatus {
 class AppReplica
 {
 private:
+	bool isLeader;
     int opLength = 1;
     int totalBlocks = 0;
     std::vector<std::string> file;
     int currentAppendIndex = 0;
 
     //the value in durability log is a tuple of position, request. key is clientid, clientrequestid
-    ConcurrentHashMap<CXID, std::pair<uint64_t, specpaxos::vr::proto::RequestMessage>> durabilityLog;
+    std::unordered_map<CXID, std::pair<uint64_t, specpaxos::vr::proto::RequestMessage>> durabilityLog;
+    std::unordered_map<uint64_t, uint64_t> durLogClientTable;
+    boost::lockfree::spsc_queue<CXID> committedEntries{10000};
+
     int durLogIndex = 0;
 
     void apply(string data) {
@@ -98,15 +98,11 @@ private:
     	return !op.compare("a") || !op.compare("A");
     }
 
-    bool IsNonNilextWrite(string op) {
-    	return !op.compare("e") || !op.compare("E");
-    }
-
 public:
 	boost::lockfree::spsc_queue<specpaxos::vr::proto::RequestMessage> queue{10000000};
 	ConcurrentHashMap<uint64_t, std::unique_ptr<TransportAddress> > clientAddresses;
     
-    AppReplica(): durabilityLog(10*1000*1000){
+    AppReplica(){
     };
 
     virtual ~AppReplica() { };
@@ -117,6 +113,7 @@ public:
 	virtual std::queue<specpaxos::vr::proto::RequestMessage> GetAndDeleteFromQueue() {
 		std::queue<specpaxos::vr::proto::RequestMessage> tmp;
 		specpaxos::vr::proto::RequestMessage tmp_msg;
+        // limiting the number of items dequeued to what is available to read now.
         int to_read = queue.read_available();
         while (to_read) {
             if (queue.pop(tmp_msg)) {
@@ -127,23 +124,17 @@ public:
 		return tmp;
 	}
 
-	virtual bool IsNilext(specpaxos::vr::proto::RequestMessage msg) {
+	virtual bool ExposesState(specpaxos::vr::proto::RequestMessage msg) {
 		string op = msg.req().op().substr(0, opLength);
-		return IsAppend(op);
+		return IsRead(op);
 	}
 
-	/*
-	 * The AppUpcall encompasses both makedurable and read upcalls to the storage system
-	 * If this is a nilext operation, then the operation is added to the durability log
-	 * If this is a read operation, the readRes which is an out parameter contains the result of the read
-	 * If the read requires a sync, syncOrder is set to true.
-	 * Note that clients do not send the non-nilext operations to the durability server; they are
-	 * immediately ordered by sending to consensus.
-	*/
-
-	virtual void AppUpcall(specpaxos::vr::proto::RequestMessage msg, bool &syncOrder, string &readRes) {
+	// Invoke callback on the leader, with the option to replicate on success
+	virtual void AppUpcall(specpaxos::vr::proto::RequestMessage msg, bool leader, bool &syncOrder, string &readRes) {
 		syncOrder = false;
-
+		isLeader = leader;
+		static int batch_window = 0;
+		batch_window++;
 		size_t totalLen = msg.req().op().size();
 		string op = msg.req().op().substr(0, opLength);
 		string remaining = msg.req().op().substr(opLength, totalLen - opLength);
@@ -151,19 +142,64 @@ public:
 		std::pair<uint64_t, uint64_t> tableKey = std::make_pair(
 				msg.req().clientid(), msg.req().clientreqid());
 
-		if (IsAppend(op)) {
-			durabilityLog.insert_or_assign(tableKey, std::make_pair(durLogIndex, msg));
-			readRes = "durable-ack";
-			durLogIndex++;
-		} else if (IsRead(op)) {
-			int blockToRead = std::stoi(remaining);
-			// Notice("Read for block-%d", blockToRead);
-			if (blockToRead < totalBlocks) {
-				readRes = read(blockToRead);
-			} else {
-				syncOrder = true;
-				readRes = "ordernowread!";
+		if (batch_window % 4 == 0) {
+			batch_window = 0;
+			int to_commit = committedEntries.read_available();
+			while (to_commit) {
+				CXID clientRequestID;
+				if (committedEntries.pop(clientRequestID)) {
+					//erase from durability log
+					durabilityLog.erase(clientRequestID);
+					to_commit--;
+					if (durLogClientTable.find(clientRequestID.first) != durLogClientTable.end()) {
+						//client id is there in the table
+						// so check if we have seen a more recent request.
+						if (durLogClientTable[clientRequestID.first] < clientRequestID.second) {
+							durLogClientTable.insert_or_assign(clientRequestID.first,
+									clientRequestID.second);
+						}
+					} else {
+						//client id is not there in the table; so insert this.
+						durLogClientTable.insert_or_assign(clientRequestID.first,
+								clientRequestID.second);
+					}
+				}
 			}
+		}
+
+
+
+		if (IsAppend(op)) {
+			bool alreadySeen = false;
+			if (durLogClientTable.find(tableKey.first) != durLogClientTable.end()) {
+				//client id is there in the table
+				// so check if we have seen a more recent request.
+				if (durLogClientTable[tableKey.first] >= tableKey.second ) {
+					alreadySeen = true;
+				}
+			}
+
+			if (!alreadySeen) {
+				syncOrder = durabilityLog.size() > 0;
+				if(!syncOrder) {
+					durabilityLog.insert_or_assign(tableKey, std::make_pair(1,msg));
+					durLogClientTable.insert_or_assign(tableKey.first, tableKey.second);
+					if (isLeader) {
+						apply(remaining);
+					}
+					readRes = "durable-ack2";
+				} else{
+					readRes = "ordernowconflictingappend!";
+					if (isLeader) {
+						durabilityLog.insert_or_assign(tableKey, std::make_pair(2,msg));
+						durLogClientTable.insert_or_assign(tableKey.first, tableKey.second);
+					}
+				}
+			} else {
+				readRes = "duplicate-ack2";
+			}
+		} else if (IsRead(op)) {
+			assert(0); // for curp-kv workloads, we are going to do write-only workloads
 		} else {
 			Panic("Unknown operation to file-append store app %s", msg.req().op().c_str());
 		}
@@ -182,11 +218,12 @@ public:
 			to_read--;
 		}
 		if (queue.read_available()) {
+			Notice("Clearing queue again");
 			clearQueue();
 		}
+		//Notice("Clearing queue");
 	}
 
-	// Used during recovery and viewchange
 	virtual void addToDurabilityLogInOrder(std::vector<Request> requests) {
 		//Notice("addToDurabilityLogInOrder");
 		for (auto it : requests) {
@@ -200,7 +237,6 @@ public:
 	};
 
 	// get the durability log in order.
-	// Used during recovery and viewchange
 	virtual std::vector<Request> GetDurabilityLogInOrder() {
 		std::vector<std::pair<uint64_t, specpaxos::vr::proto::RequestMessage>> toSort;
 		for (auto &it : durabilityLog) {
@@ -225,20 +261,30 @@ public:
 	};
 
 	// Invoke callback on all replicas
-	// This is called when a request is committed (either synchronously or in background)
     virtual void ReplicaUpcall(opnum_t opnum, const Request &req, string &str2,
                                void *arg = nullptr, void *ret = nullptr) {
 
     	size_t totalLen = req.op().size();
     	string op = req.op().substr(0, opLength);
 		string remaining = req.op().substr(opLength, totalLen - opLength);
-
+		CXID tableKey = std::make_pair(req.clientid(), req.clientreqid());
     	if(!IsRead(op)) {
-			apply(remaining);
-			str2 = "";
-			durabilityLog.erase(std::make_pair(req.clientid(), req.clientreqid()));
+    		if(!isLeader) {
+				apply(remaining);
+			}else {
+				if(req.syncread() == 1) {
+					// leader had a conflicting request and did not apply in the fast path
+					// apply now
+					apply(remaining);
+				}
+			}
+
+			str2 = boost::lexical_cast<string>(totalBlocks);
+			//durabilityLog.erase(tableKey);
+			while(!committedEntries.push(tableKey));
+			// outstandingOps.erase(tableKey);
     	} else {
-    		// populate read result
+    		// populate read result	
     		str2 = read(std::stoi(remaining));
     	}
     };
@@ -260,7 +306,7 @@ public:
     virtual ~Replica();
 
 protected:
-    void LeaderUpcall(specpaxos::vr::proto::RequestMessage msg, bool &syncOrder, string &readRes);
+    void LeaderUpcall(specpaxos::vr::proto::RequestMessage msg, bool leader, bool &syncOrder, string &readRes);
     void ReplicaUpcall(opnum_t opnum, const Request &req, string &res,
                        void *arg = nullptr, void *ret = nullptr);
     template<class MSG> void Execute(opnum_t opnum,
